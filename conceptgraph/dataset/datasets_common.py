@@ -20,13 +20,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from natsort import natsorted
-from scipy.spatial.transform import Rotation as R
-
 from gradslam.datasets import datautils
 from gradslam.geometry.geometryutils import relative_transformation
 from gradslam.slam.pointfusion import PointFusion
 from gradslam.structures.rgbdimages import RGBDImages
+
+# from habitat_llm.world_model.concept_graphs.hab_dataset import HabitatDataset
+from natsort import natsorted
+from scipy.spatial.transform import Rotation as R
 
 from conceptgraph.utils.general_utils import to_scalar
 
@@ -1022,134 +1023,6 @@ class Hm3dDataset(GradSLAMDataset):
         return poses
 
 
-class HabitatDataset(GradSLAMDataset):
-    def __init__(
-        self,
-        config_dict,
-        basedir,
-        sequence,
-        stride: Optional[int] = None,
-        start: Optional[int] = 0,
-        end: Optional[int] = -1,
-        desired_height: Optional[int] = 480,
-        desired_width: Optional[int] = 640,
-        load_embeddings: Optional[bool] = False,
-        embedding_dir: Optional[str] = "embeddings",
-        embedding_dim: Optional[int] = 512,
-        pose_subdir: str = "pose",
-        rgb_subdir: str = "rgb",
-        depth_subdir: str = "depth",
-        intrinsic_filename: str = "intrinsics.npy",
-        relative_pose: bool = True,
-        **kwargs,
-    ):
-        self.input_folder = os.path.join(basedir, sequence)
-        # if os.path.exists(os.path.join(basedir, sequence, "icp_poses")):
-        #     self.pose_subdir = os.path.join(basedir, sequence, "icp_poses")
-        # else:
-        self.pose_subdir = os.path.join(basedir, sequence, pose_subdir)
-        self.rgb_subdir = os.path.join(basedir, sequence, rgb_subdir)
-        self.depth_subdir = os.path.join(basedir, sequence, depth_subdir)
-        rot_correction = R.from_euler(
-            "xyz", [np.pi / 2, np.pi / 2, 0.0]).as_matrix()
-        self.correction = np.eye(4)
-        self.correction[:3, :3] = rot_correction
-        super().__init__(
-            config_dict,
-            stride=stride,
-            start=start,
-            end=end,
-            desired_height=config_dict["desired_height"]
-            if "desired_height" in config_dict.keys()
-            else desired_height,
-            desired_width=config_dict["desired_width"]
-            if "desired_width" in config_dict.keys()
-            else desired_width,
-            load_embeddings=load_embeddings,
-            embedding_dir=embedding_dir,
-            embedding_dim=embedding_dim,
-            relative_pose=config_dict["relative_pose"],
-            **kwargs,
-        )
-        camera_params = np.load(os.path.join(
-            basedir, sequence, intrinsic_filename))
-        self.fx = camera_params[0, 0]
-        self.fy = camera_params[0, 1]
-        self.cx = camera_params[0, 2]
-        self.cy = camera_params[0, 3]
-
-    def get_filepaths(self):
-        # apparently this gives a naturally sorted list
-        rgb_paths = glob.glob(os.path.join(self.rgb_subdir, "*.npy"))
-        depth_paths = glob.glob(os.path.join(self.depth_subdir, "*.npy"))
-        return rgb_paths, depth_paths, None
-
-    def load_poses(self):
-        pose_paths = glob.glob(os.path.join(self.pose_subdir, "*.npy"))
-        poses = []
-        for pp in pose_paths:
-            _pose = np.load(pp)
-            # _pose = self.opengl_to_opencv(np.linalg.inv(_pose))
-            _pose = self.opengl_to_opencv(_pose)
-            poses.append(torch.from_numpy(_pose))
-        return poses
-
-    def opengl_to_opencv(self, pose):
-        transform = np.array(
-            [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-        pose = pose @ transform
-        return pose
-
-    def _preprocess_depth(self, depth: np.ndarray):
-        r"""Preprocesses the depth image by resizing, adding channel dimension, and scaling values to meters. Optionally
-        converts depth from channels last :math:`(H, W, 1)` to channels first :math:`(1, H, W)` representation.
-
-        Args:
-            depth (np.ndarray): Raw depth image
-
-        Returns:
-            np.ndarray: Preprocessed depth
-
-        Shape:
-            - depth: :math:`(H_\text{old}, W_\text{old})`
-            - Output: :math:`(H, W, 1)` if `self.channels_first == False`, else :math:`(1, H, W)`.
-        """
-        depth = cv2.resize(
-            depth.astype(float),
-            (self.desired_width, self.desired_height),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        # depth = np.flipud(depth).copy()
-        depth = np.expand_dims(depth, -1)
-        if self.channels_first:
-            depth = datautils.channels_first(depth)
-        return depth / self.png_depth_scale
-
-    def _preprocess_color(self, color: np.ndarray):
-        r"""Preprocesses the color image by resizing to :math:`(H, W, C)`, (optionally) normalizing values to
-        :math:`[0, 1]`, and (optionally) using channels first :math:`(C, H, W)` representation.
-
-        Args:
-            color (np.ndarray): Raw input rgb image
-
-        Retruns:
-            np.ndarray: Preprocessed rgb image
-
-        Shape:
-            - Input: :math:`(H_\text{old}, W_\text{old}, C)`
-            - Output: :math:`(H, W, C)` if `self.channels_first == False`, else :math:`(C, H, W)`.
-        """
-        color = cv2.resize(
-            color,
-            (self.desired_width, self.desired_height),
-            interpolation=cv2.INTER_LINEAR,
-        )
-        # color = np.flipud(color).copy()
-        if self.normalize_color:
-            color = datautils.normalize_image(color)
-        if self.channels_first:
-            color = datautils.channels_first(color)
-        return color
 
 
 def load_dataset_config(path, default_path=None):

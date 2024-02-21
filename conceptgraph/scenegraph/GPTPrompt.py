@@ -16,18 +16,19 @@ class GPTPrompt:
         inconsistent, output "invalid" for that object.
 
         Additionally, also output a category tag which classifies each object as an
-        object or a receptacle. Receptacles are objects that have a surface and can hold
-        other objects. For example, a table is a receptacle, so is a chair but a vase is
-        not a receptacle. This tag should either be "object" or "receptacle".
+        object or a furniture. Furnitures are usually medium to large sized object,
+        that are not moved everyday. Objects are small to medium objects which may move
+        around the house everyday.
 
         The output must be a single JSON containing just the following fields. "summary" indicating a brief 
         summary of your understanding of the object being referenced to. "possible_tags" indicating a list of 
-        possible tags that you think the object could be. "category_tag" indicating
-        whether this object is an object or a receptacle. "object_tag" indicating the final tag that you think 
-        this object should be, considering everything else in the scene (particularly, nearby other objects). 
-        Before suggesting the final tag, consider the actual size of the object (you have this in the "bbox") 
+        possible tags that you think the object could be.
+        "object_tag" indicating the final tag that you think this object should be,
+        considering everything else in the scene (particularly, nearby other objects). 
+        "category_tag" indicating whether this object is an object or a furniture. 
+        Before suggesting the object and category tags, consider the actual size of the object (you have this in the "bbox") 
         and identify the best possible tag this object could be. Verify that the output is in valid JSON format with
-        the fields "summary", "possible_tags", "category_tag" and "object_tag". The object_tag must be supported by the captions.
+        the fields "summary", "possible_tags", "object_tag" and "category_tag". The object_tag must be supported by the captions.
         It is very important that the output must be valid JSON, and nothing else.
         """
 
@@ -44,12 +45,13 @@ class GPTPrompt:
                              unrelated, non-repeating (or empty) captions, summarize as
                              'conflicting (or empty) captions about [objects]' and set
                              'object_tag' to 'invalid'. Output 'possible_tags' listing
-                             potential object categories. Also output a 'category_tag'
-                             classifying each object as an object or a receptacle.
-                             Receptacles are usually medium to large sized furniture
-                             which has a surface and can support another object.
-                             Set 'object_tag' as the conclusive identification. Focus on
-                             indoor object types, as the input captions are from indoor scans."""
+                             potential object categories. Set 'object_tag' as the
+                             conclusive identification. Output a 'category_tag'
+                             classifying the summarized object as an object or a furniture.
+                             Furnitures are larger than objects and not expected to be
+                             moved around in a house evryday. An object can be placed
+                             upon a furniture. 
+                             Focus on indoor object types, as the input captions are from indoor scans."""
 
         self.example_1 = """
         "id": 1,
