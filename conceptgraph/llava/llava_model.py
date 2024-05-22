@@ -583,174 +583,277 @@ class LlavaLlamaForCausalLMTweaked(LlamaForCausalLM):
             [DEFAULT_IMAGE_PATCH_TOKEN]
         )[0]
 
+from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.model.builder import load_pretrained_model
+from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.conversation import conv_templates, SeparatorStyle
 
 class LLaVaChat(object):
-    def __init__(self, model_path, conv_mode="multimodal", num_gpus=1):
-        self.model_path = model_path
-        self.conv_mode = conv_mode
-        self.num_gpus = num_gpus
 
-        # Handle multi-gpu config
-        if self.num_gpus == 1:
-            kwargs = {}
-        else:
-            kwargs = {
-                "device_map": "auto",
-                "max_memory": {i: "13GiB" for i in range(self.num_gpus)},
-            }
-
-        # pytorch spends a substantial amount of time initializing default weights for
-        # each linear layer and layernorm layer in the model. Since we will load weights
-        # from disk anyways, disable this redundant default init.
-        # This accelerates model creation.
+    def __init__(self, model_path, model_base, conv_mode=None):
+        # Model
         disable_torch_init()
 
-        # Initialize the tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-        # Initialize the model
-        self.model = LlavaLlamaForCausalLMTweaked.from_pretrained(
-            self.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True, **kwargs
+        self.model_name = get_model_name_from_path(model_path)
+        self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
+            model_path, model_base, self.model_name
         )
-        self.model.cuda()
-
-        # Image preprocessor
-        self.image_processor = CLIPImageProcessor.from_pretrained(
-            self.model.config.mm_vision_tower, torch_dtype=torch.float16
-        )
-
-        self.mm_use_im_start_end = getattr(
-            self.model.config, "mm_use_im_start_end", False
-        )
-        self.tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
-        if self.mm_use_im_start_end:
-            self.tokenizer.add_tokens(
-                [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
-            )
-
-        self.vision_tower = self.model.get_model().vision_tower[0]
-        if self.vision_tower.device.type == "meta":
-            self.vision_tower = CLIPVisionModel.from_pretrained(
-                self.vision_tower.config._name_or_path,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-            ).cuda()
-            self.model.get_model().vision_tower[0] = self.vision_tower
+        
+        self.conv_mode = None
+        if conv_mode is not None:
+            self.conv_mode = conv_mode
         else:
-            self.vision_tower.to(device="cuda", dtype=torch.float16)
-        self.vision_config = self.vision_tower.config
-        self.vision_config.im_patch_token = self.tokenizer.convert_tokens_to_ids(
-            [DEFAULT_IMAGE_PATCH_TOKEN]
-        )[0]
-        self.vision_config.use_im_start_end = self.mm_use_im_start_end
-        if self.mm_use_im_start_end:
-            (
-                self.vision_config.im_start_token,
-                self.vision_config.im_end_token,
-            ) = self.tokenizer.convert_tokens_to_ids(
-                [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN]
-            )
-        self.image_token_len = (
-            self.vision_config.image_size // self.vision_config.patch_size
-        ) ** 2
+            if 'llama-2' in self.model_name.lower():
+                self.conv_mode = "llava_llama_2"
+            elif "v1" in self.model_name.lower():
+                self.conv_mode = "llava_v1"
+            elif "mpt" in self.model_name.lower():
+                self.conv_mode = "mpt"
+            else:
+                self.conv_mode = "llava_v0"
 
-        # # Initialize a conversation from template (default conv_mode is "multimodal")
-        # # (conv_mode determines the conversation template to use from llava.conversation module)
-        # self.conv = conv_templates[self.conv_mode].copy()
-
-        # # Cache for image features
-        # self.image_features = None
-        
         self.reset()
-        
+
     def reset(self):
         # Initialize a conversation from template (default conv_mode is "multimodal")
         # (conv_mode determines the conversation template to use from llava.conversation module)
         self.conv = conv_templates[self.conv_mode].copy()
-        
+
         # Cache for image features
         self.image_features = None
-
+    
     def __call__(self, query, image_features=None):
-        # Given this query, and the image_featurese, prompt LLaVA with the query,
-        # using the image_features as context.
 
         qs = query
         if image_features is not None:
-            if self.mm_use_im_start_end:
-                qs = (
-                    qs
-                    + "\n"
-                    + DEFAULT_IM_START_TOKEN
-                    + DEFAULT_IMAGE_PATCH_TOKEN * self.image_token_len
-                    + DEFAULT_IM_END_TOKEN
-                )
+            if self.model.config.mm_use_im_start_end:
+                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
             else:
-                qs = qs + "\n" + DEFAULT_IMAGE_PATCH_TOKEN * self.image_token_len
-            if self.image_features is None:
-                self.image_features = image_features
+                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
         else:
-            qs = qs + "\n"
-
+            qs = qs + '\n'
+        
+        if self.image_features is None:
+            self.image_features = image_features
+        
         self.conv.append_message(self.conv.roles[0], qs)
         self.conv.append_message(self.conv.roles[1], None)
 
         input_ids = None
-
         # Get the prompt
         prompt = self.conv.get_prompt()
         # Tokenize this prompt
-        inputs = self.tokenizer([prompt])
-        # Cast to torch tensor and to GPU
-        input_ids = torch.as_tensor(inputs.input_ids).cuda()
+        input_ids = tokenizer_image_token(
+            prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
+        ).unsqueeze(0).cuda()
 
-        stop_str = (
-            self.conv.sep
-            if self.conv.sep_style != SeparatorStyle.TWO
-            else self.conv.sep2
-        )
+        stop_str = self.conv.sep if self.conv.sep_style != SeparatorStyle.TWO else self.conv.sep2
         keywords = [stop_str]
-        stopping_criteria = KeywordsStoppingCriteria(
-            keywords, self.tokenizer, input_ids
-        )
+        stopping_criteria = KeywordsStoppingCriteria(keywords, self.tokenizer, input_ids)
 
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
+                images=None,
                 image_features=self.image_features,
                 do_sample=True,
                 temperature=0.2,
                 max_new_tokens=1024,
+                use_cache=True,
                 stopping_criteria=[stopping_criteria],
             )
 
         input_token_len = input_ids.shape[1]
-        n_diff_input_output = (
-            (input_ids != output_ids[:, :input_token_len]).sum().item()
-        )
+        n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
         if n_diff_input_output > 0:
-            print(
-                f"[Warning] {n_diff_input_output} output_ids are not the same as the input_ids"
-            )
-        outputs = self.tokenizer.batch_decode(
-            output_ids[:, input_token_len:], skip_special_tokens=True
-        )[0]
+            print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+        outputs = self.tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
         self.conv.append_message(self.conv.roles[1], outputs)
         outputs = outputs.strip()
         if outputs.endswith(stop_str):
-            outputs = outputs[: -len(stop_str)]
+            outputs = outputs[:-len(stop_str)]
         outputs = outputs.strip()
         return outputs
-
+    
     def load_image(self, image_file):
-        if image_file.startswith("http") or image_file.startswith("https"):
+        if image_file.startswith('http') or image_file.startswith('https'):
             response = requests.get(image_file)
-            image = Image.open(BytesIO(response.content)).convert("RGB")
+            image = Image.open(BytesIO(response.content)).convert('RGB')
         else:
-            image = Image.open(image_file).convert("RGB")
+            image = Image.open(image_file).convert('RGB')
         return image
-
+    
     def encode_image(self, image_tensor_half_cuda):
-        return self.model.model.encode_image(image_tensor_half_cuda)
+        return self.model.encode_images(image_tensor_half_cuda)
+
+
+# class LLaVaChat(object):
+#     def __init__(self, model_path, conv_mode="multimodal", num_gpus=1):
+#         self.model_path = model_path
+#         self.conv_mode = conv_mode
+#         self.num_gpus = num_gpus
+# 
+#         # Handle multi-gpu config
+#         if self.num_gpus == 1:
+#             kwargs = {}
+#         else:
+#             kwargs = {
+#                 "device_map": "auto",
+#                 "max_memory": {i: "13GiB" for i in range(self.num_gpus)},
+#             }
+# 
+#         # pytorch spends a substantial amount of time initializing default weights for
+#         # each linear layer and layernorm layer in the model. Since we will load weights
+#         # from disk anyways, disable this redundant default init.
+#         # This accelerates model creation.
+#         disable_torch_init()
+# 
+#         # Initialize the tokenizer
+#         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+#         # Initialize the model
+#         self.model = LlavaLlamaForCausalLMTweaked.from_pretrained(
+#             self.model_path, torch_dtype=torch.float16, low_cpu_mem_usage=False, **kwargs
+#         )
+#         self.model.cuda()
+# 
+#         # Image preprocessor
+#         self.image_processor = CLIPImageProcessor.from_pretrained(
+#             self.model.config.mm_vision_tower, torch_dtype=torch.float16
+#         )
+# 
+#         self.mm_use_im_start_end = getattr(
+#             self.model.config, "mm_use_im_start_end", False
+#         )
+#         self.tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
+#         if self.mm_use_im_start_end:
+#             self.tokenizer.add_tokens(
+#                 [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
+#             )
+# 
+#         self.vision_tower = self.model.get_model().vision_tower[0]
+#         if self.vision_tower.device.type == "meta":
+#             self.vision_tower = CLIPVisionModel.from_pretrained(
+#                 self.vision_tower.config._name_or_path,
+#                 torch_dtype=torch.float16,
+#                 low_cpu_mem_usage=True,
+#             ).cuda()
+#             self.model.get_model().vision_tower[0] = self.vision_tower
+#         else:
+#             self.vision_tower.to(device="cuda", dtype=torch.float16)
+#         self.vision_config = self.vision_tower.config
+#         self.vision_config.im_patch_token = self.tokenizer.convert_tokens_to_ids(
+#             [DEFAULT_IMAGE_PATCH_TOKEN]
+#         )[0]
+#         self.vision_config.use_im_start_end = self.mm_use_im_start_end
+#         if self.mm_use_im_start_end:
+#             (
+#                 self.vision_config.im_start_token,
+#                 self.vision_config.im_end_token,
+#             ) = self.tokenizer.convert_tokens_to_ids(
+#                 [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN]
+#             )
+#         self.image_token_len = (
+#             self.vision_config.image_size // self.vision_config.patch_size
+#         ) ** 2
+# 
+#         # # Initialize a conversation from template (default conv_mode is "multimodal")
+#         # # (conv_mode determines the conversation template to use from llava.conversation module)
+#         # self.conv = conv_templates[self.conv_mode].copy()
+# 
+#         # # Cache for image features
+#         # self.image_features = None
+#         
+#         self.reset()
+#         
+#     def reset(self):
+#         # Initialize a conversation from template (default conv_mode is "multimodal")
+#         # (conv_mode determines the conversation template to use from llava.conversation module)
+#         self.conv = conv_templates[self.conv_mode].copy()
+#         
+#         # Cache for image features
+#         self.image_features = None
+# 
+#     def __call__(self, query, image_features=None):
+#         # Given this query, and the image_featurese, prompt LLaVA with the query,
+#         # using the image_features as context.
+# 
+#         qs = query
+#         if image_features is not None:
+#             if self.mm_use_im_start_end:
+#                 qs = (
+#                     qs
+#                     + "\n"
+#                     + DEFAULT_IM_START_TOKEN
+#                     + DEFAULT_IMAGE_PATCH_TOKEN * self.image_token_len
+#                     + DEFAULT_IM_END_TOKEN
+#                 )
+#             else:
+#                 qs = qs + "\n" + DEFAULT_IMAGE_PATCH_TOKEN * self.image_token_len
+#             if self.image_features is None:
+#                 self.image_features = image_features
+#         else:
+#             qs = qs + "\n"
+# 
+#         self.conv.append_message(self.conv.roles[0], qs)
+#         self.conv.append_message(self.conv.roles[1], None)
+# 
+#         input_ids = None
+# 
+#         # Get the prompt
+#         prompt = self.conv.get_prompt()
+#         # Tokenize this prompt
+#         inputs = self.tokenizer([prompt])
+#         # Cast to torch tensor and to GPU
+#         input_ids = torch.as_tensor(inputs.input_ids).cuda()
+# 
+#         stop_str = (
+#             self.conv.sep
+#             if self.conv.sep_style != SeparatorStyle.TWO
+#             else self.conv.sep2
+#         )
+#         keywords = [stop_str]
+#         stopping_criteria = KeywordsStoppingCriteria(
+#             keywords, self.tokenizer, input_ids
+#         )
+# 
+#         with torch.inference_mode():
+#             output_ids = self.model.generate(
+#                 input_ids,
+#                 image_features=self.image_features,
+#                 do_sample=True,
+#                 temperature=0.2,
+#                 max_new_tokens=1024,
+#                 stopping_criteria=[stopping_criteria],
+#             )
+# 
+#         input_token_len = input_ids.shape[1]
+#         n_diff_input_output = (
+#             (input_ids != output_ids[:, :input_token_len]).sum().item()
+#         )
+#         if n_diff_input_output > 0:
+#             print(
+#                 f"[Warning] {n_diff_input_output} output_ids are not the same as the input_ids"
+#             )
+#         outputs = self.tokenizer.batch_decode(
+#             output_ids[:, input_token_len:], skip_special_tokens=True
+#         )[0]
+#         self.conv.append_message(self.conv.roles[1], outputs)
+#         outputs = outputs.strip()
+#         if outputs.endswith(stop_str):
+#             outputs = outputs[: -len(stop_str)]
+#         outputs = outputs.strip()
+#         return outputs
+# 
+#     def load_image(self, image_file):
+#         if image_file.startswith("http") or image_file.startswith("https"):
+#             response = requests.get(image_file)
+#             image = Image.open(BytesIO(response.content)).convert("RGB")
+#         else:
+#             image = Image.open(image_file).convert("RGB")
+#         return image
+# 
+#     def encode_image(self, image_tensor_half_cuda):
+#         return self.model.model.encode_image(image_tensor_half_cuda)
     
 
 
@@ -777,7 +880,7 @@ if __name__ == "__main__":
             print("Please provide a model path or set the environment variable LLAVA_CKPT_PATH")
             exit(1)
 
-    chat = LLaVaChat(args.model_path, args.conv_mode, args.num_gpus)
+    chat = LLaVaChat(args.model_path, None)
     print("LLaVA chat initialized...")
 
     image = chat.load_image(args.image_file)
