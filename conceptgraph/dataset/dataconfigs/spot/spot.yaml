@@ -1,0 +1,14 @@
+dataset_name: 'spotdata'
+pickle_file: "2024,03,08-15,02,11.pkl"
+desired_height: 480
+desired_width: 640
+relative_pose: False
+camera_params:
+  image_height: 480
+  image_width: 640
+  fx: 600.0
+  fy: 600.0
+  cx: 599.5
+  cy: 339.5
+  png_depth_scale: 1 #for depth image in png format
+  crop_edge: 0
