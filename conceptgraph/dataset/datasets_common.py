@@ -396,7 +396,7 @@ class SpotDataset(GradSLAMDataset):
         for datum in self.data:
             global_T_base = datum["vision_T_base"]
             base_T_cam = datum["camera_data"][0]["base_T_camera"]
-            poses.append(torch.from_numpy(global_T_base @ base_T_cam))
+            poses.append(torch.from_numpy(base_T_cam))
         return poses
 
     def get_filepaths(self):
@@ -406,20 +406,20 @@ class SpotDataset(GradSLAMDataset):
     def __getitem__(self, index):
         color_image = None
         depth_image = None
-        pose = self.poses[index]
         intrinsics = torch.eye(4)
+        datum = self.data[index]
+        pose = torch.from_numpy(datum["vision_T_base"] @ datum["camera_data"][0]["base_T_camera"])
 
         cam_data_list = self.data[index]["camera_data"]
         for current_cam_data in cam_data_list:
             if "depth" in current_cam_data["src_info"]:
                 depth_image = torch.from_numpy(current_cam_data["raw_image"].astype(np.int32)).unsqueeze(
                     -1
-                )
+                ) / 1000.0
             else:
                 color_image = torch.from_numpy(current_cam_data["raw_image"])
                 intrinsics[:3, :3] = torch.from_numpy(current_cam_data["camera_intrinsics"])
 
-        breakpoint()
         return (
             color_image.to(self.device).type(self.dtype),
             depth_image.to(self.device).type(self.dtype),
