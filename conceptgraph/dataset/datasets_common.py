@@ -24,8 +24,7 @@ from gradslam.datasets import datautils
 from gradslam.geometry.geometryutils import relative_transformation
 from gradslam.slam.pointfusion import PointFusion
 from gradslam.structures.rgbdimages import RGBDImages
-
-# from habitat_llm.world_model.concept_graphs.hab_dataset import HabitatDataset
+from habitat_llm.concept_graphs.hab_dataset import HabitatDataset
 from natsort import natsorted
 from scipy.spatial.transform import Rotation as R
 
