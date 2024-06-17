@@ -1,8 +1,11 @@
-'''
+"""
 Acknowledgements: 
 This code is adapted from the LLaVA repository by Krishna Murthy Jatavallabhula 
-'''
+"""
 
+from llava.utils import disable_torch_init
+from llava.mm_utils import KeywordsStoppingCriteria
+from llava.conversation import SeparatorStyle, conv_templates
 import argparse
 import os
 import pickle as pkl
@@ -42,15 +45,15 @@ from transformers.modeling_outputs import (
 try:
     LLAVA_PYTHON_PATH = os.environ["LLAVA_PYTHON_PATH"]
 except KeyError:
-    print("Please set the environment variable LLAVA_PYTHON_PATH to the path of the LLaVA repository")
+    print(
+        "Please set the environment variable LLAVA_PYTHON_PATH to the path of the LLaVA repository"
+    )
     sys.exit(1)
-    
+
 sys.path.append(LLAVA_PYTHON_PATH)
 
-from llava.conversation import SeparatorStyle, conv_templates
+
 # from llava.model.utils import KeywordsStoppingCriteria
-from llava.mm_utils import KeywordsStoppingCriteria
-from llava.utils import disable_torch_init
 
 torch.autograd.set_grad_enabled(False)
 
@@ -83,7 +86,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
 
         # Instantiate the multimodal linear projection (vision-language)
         if hasattr(config, "use_mm_proj"):
-            self.mm_projector = nn.Linear(config.mm_hidden_size, config.hidden_size)
+            self.mm_projector = nn.Linear(
+                config.mm_hidden_size, config.hidden_size)
 
     def get_vision_tower(self):
         # Return the vision tower
@@ -116,7 +120,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
             self.vision_tower = vision_tower
 
         vision_config = vision_tower.config
-        num_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        num_patches = (vision_config.image_size //
+                       vision_config.patch_size) ** 2
 
         # If using a vision tower, we need a multimodal projection (from vision to text)
         self.config.use_mm_proj = True
@@ -173,7 +178,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
                     select_hidden_state = image_forward_outs.hidden_states[
                         select_hidden_state_layer
                     ]
-                    image_features = select_hidden_state[:, 1:].to(images.dtype)
+                    image_features = select_hidden_state[:, 1:].to(
+                        images.dtype)
                     # image_features = self.mm_projector(image_features)
             return image_features
 
@@ -232,7 +238,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
                         select_hidden_state = image_forward_outs.hidden_states[
                             select_hidden_state_layer
                         ]
-                        image_features = select_hidden_state[:, 1:].to(images.dtype)
+                        image_features = select_hidden_state[:, 1:].to(
+                            images.dtype)
                 if type(images) is list:
                     image_features = [
                         self.mm_projector(image_feature)[0]
@@ -288,7 +295,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
                         )
                         num_patches = cur_image_features.shape[0]
                         if (
-                            cur_input_ids[image_start_token_pos + num_patches + 1]
+                            cur_input_ids[image_start_token_pos +
+                                          num_patches + 1]
                             != vision_tower.config.im_end_token
                         ):
                             raise ValueError(
@@ -297,21 +305,22 @@ class LlavaLlamaModelTweaked(LlamaModel):
                         if orig_embeds_params is not None:
                             cur_new_input_embeds = torch.cat(
                                 (
-                                    cur_input_embeds[:image_start_token_pos].detach(),
+                                    cur_input_embeds[:image_start_token_pos].detach(
+                                    ),
                                     cur_input_embeds[
-                                        image_start_token_pos : image_start_token_pos
+                                        image_start_token_pos: image_start_token_pos
                                         + 1
                                     ],
                                     cur_image_features,
                                     cur_input_embeds[
                                         image_start_token_pos
                                         + num_patches
-                                        + 1 : image_start_token_pos
+                                        + 1: image_start_token_pos
                                         + num_patches
                                         + 2
                                     ],
                                     cur_input_embeds[
-                                        image_start_token_pos + num_patches + 2 :
+                                        image_start_token_pos + num_patches + 2:
                                     ].detach(),
                                 ),
                                 dim=0,
@@ -322,7 +331,7 @@ class LlavaLlamaModelTweaked(LlamaModel):
                                     cur_input_embeds[: image_start_token_pos + 1],
                                     cur_image_features,
                                     cur_input_embeds[
-                                        image_start_token_pos + num_patches + 1 :
+                                        image_start_token_pos + num_patches + 1:
                                     ],
                                 ),
                                 dim=0,
@@ -360,7 +369,7 @@ class LlavaLlamaModelTweaked(LlamaModel):
                                 cur_input_embeds[:mask_index_start].detach(),
                                 cur_image_features,
                                 cur_input_embeds[
-                                    mask_index_start + num_patches :
+                                    mask_index_start + num_patches:
                                 ].detach(),
                             ),
                             dim=0,
@@ -370,7 +379,8 @@ class LlavaLlamaModelTweaked(LlamaModel):
                             (
                                 cur_input_embeds[:mask_index_start],
                                 cur_image_features,
-                                cur_input_embeds[mask_index_start + num_patches :],
+                                cur_input_embeds[mask_index_start +
+                                                 num_patches:],
                             ),
                             dim=0,
                         )
@@ -397,7 +407,8 @@ class LlavaLlamaForCausalLMTweaked(LlamaForCausalLM):
         super().__init__(config)
         self.model = LlavaLlamaModelTweaked(config)
 
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(
+            config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -621,7 +632,8 @@ class LLaVaChat(object):
         self.mm_use_im_start_end = getattr(
             self.model.config, "mm_use_im_start_end", False
         )
-        self.tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
+        self.tokenizer.add_tokens(
+            [DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
         if self.mm_use_im_start_end:
             self.tokenizer.add_tokens(
                 [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
@@ -659,14 +671,14 @@ class LLaVaChat(object):
 
         # # Cache for image features
         # self.image_features = None
-        
+
         self.reset()
-        
+
     def reset(self):
         # Initialize a conversation from template (default conv_mode is "multimodal")
         # (conv_mode determines the conversation template to use from llava.conversation module)
         self.conv = conv_templates[self.conv_mode].copy()
-        
+
         # Cache for image features
         self.image_features = None
 
@@ -751,8 +763,6 @@ class LLaVaChat(object):
 
     def encode_image(self, image_tensor_half_cuda):
         return self.model.model.encode_image(image_tensor_half_cuda)
-    
-
 
 
 if __name__ == "__main__":
@@ -769,12 +779,14 @@ if __name__ == "__main__":
     parser.add_argument("--conv_mode", type=str, default="multimodal")
     parser.add_argument("--num_gpus", type=int, default=1)
     args = parser.parse_args()
-    
+
     if args.model_path is None:
-        try: 
+        try:
             args.model_path = os.environ["LLAVA_CKPT_PATH"]
         except KeyError:
-            print("Please provide a model path or set the environment variable LLAVA_CKPT_PATH")
+            print(
+                "Please provide a model path or set the environment variable LLAVA_CKPT_PATH"
+            )
             exit(1)
 
     chat = LLaVaChat(args.model_path, args.conv_mode, args.num_gpus)
