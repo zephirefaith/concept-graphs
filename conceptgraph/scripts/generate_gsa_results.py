@@ -3,30 +3,33 @@ The script is used to extract Grounded SAM results on a posed RGB-D dataset.
 The results will be dumped to a folder under the scene folder. 
 """
 
-import sys
-import torch.nn.functional as F
-from conceptgraph.utils.vis import vis_result_fast, vis_result_slow_caption
-from conceptgraph.dataset.datasets_common import get_dataset
-from tqdm import trange
-import supervision as sv
-from torch.utils.data import Dataset
-import torchvision
-import torch
-import open_clip
+import argparse
 import gzip
-import pickle
-import numpy as np
+import json
 
 # from matplotlib import pyplot as plt
 import os
-import argparse
-from pathlib import Path
+import pickle
 import re
+import sys
+from pathlib import Path
 from typing import Any, List
-from PIL import Image
+
 import cv2
-import json
 import imageio
+import numpy as np
+import open_clip
+import supervision as sv
+import torch
+import torch.nn.functional as F
+import torchvision
+from PIL import Image
+from torch.utils.data import Dataset
+from tqdm import trange
+from ultralytics import YOLO
+
+from conceptgraph.dataset.datasets_common import get_dataset
+from conceptgraph.utils.vis import vis_result_fast, vis_result_slow_caption
 
 # import matplotlib
 
@@ -36,9 +39,9 @@ import imageio
 try:
     from groundingdino.util.inference import Model
     from segment_anything import (
-        sam_model_registry,
-        SamPredictor,
         SamAutomaticMaskGenerator,
+        SamPredictor,
+        sam_model_registry,
     )
 except ImportError as e:
     print(
@@ -65,11 +68,11 @@ sys.path.append(TAG2TEXT_PATH)
 sys.path.append(EFFICIENTSAM_PATH)
 try:
     # from Tag2Text.models import tag2text
-    from ram.models import tag2text, ram
+    import torchvision.transforms as TS
 
     # from Tag2Text import inference_tag2text, inference_ram
-    from ram import inference_tag2text, inference_ram
-    import torchvision.transforms as TS
+    from ram import inference_ram, inference_tag2text
+    from ram.models import ram, tag2text
 except ImportError as e:
     print("Tag2text sub-package not found. Please check your GSA_PATH. ")
     raise e
@@ -86,6 +89,82 @@ GROUNDING_DINO_CHECKPOINT_PATH = os.path.join(GSA_PATH, "./groundingdino_swint_o
 # Segment-Anything checkpoint
 SAM_ENCODER_VERSION = "vit_h"
 SAM_CHECKPOINT_PATH = os.path.join(GSA_PATH, "./sam_vit_h_4b8939.pth")
+
+# fixed set of classes for closed-vocab detections
+FIX_SET_CLASSES = [
+    "alarm_clock",
+    "animal",
+    "bathtub",
+    "bed",
+    "bench",
+    "bicycle",
+    "blender",
+    "breadbin",
+    "cabinet",
+    "camera",
+    "car",
+    "carpet",
+    "ceiling_lamp",
+    "chair",
+    "chest_of_drawers",
+    "clothing",
+    "coffee_maker",
+    "colander",
+    "couch",
+    "counter",
+    "curtain",
+    "dishwasher",
+    "door",
+    "drinkware",
+    "earphone",
+    "exercise_bike",
+    "eyeglasses",
+    "filing_cabinet",
+    "fireplace",
+    "floor_lamp",
+    "flower",
+    "fridge",
+    "grandfather_clock",
+    "kitchen_scale",
+    "mantel_clock",
+    "microwave",
+    "mirror",
+    "mixing_bowl",
+    "mobile_phone",
+    "motorcycle",
+    "oven",
+    "pathway_light",
+    "person",
+    "phone",
+    "picture",
+    "plush_toy",
+    "pot",
+    "potted_plant",
+    "printer",
+    "range_hood",
+    "shelves",
+    "shoes",
+    "shower",
+    "sink",
+    "stand",
+    "stool",
+    "table",
+    "table_lamp",
+    "toaster",
+    "toilet",
+    "toiletry",
+    "trashcan",
+    "treadmill",
+    "tree",
+    "tv",
+    "utensil",
+    "wall_clock",
+    "wall_lamp",
+    "wardrobe",
+    "washer_dryer",
+    "window",
+]
+DETECTOR = "yolo"
 
 # Tag2Text checkpoint
 TAG2TEXT_CHECKPOINT_PATH = os.path.join(GSA_PATH, "./tag2text_swin_14m.pth")
@@ -134,7 +213,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--class_set",
         type=str,
         default="scene",
-        choices=["scene", "generic", "minimal", "tag2text", "ram", "none"],
+        choices=["scene", "generic", "minimal", "tag2text", "ram", "fix_set", "none"],
         help="If none, no tagging and detection will be used and the SAM will be run in dense sampling mode. ",
     )
     parser.add_argument(
@@ -423,10 +502,10 @@ def main(args: argparse.Namespace):
     ###
     # Initialize the CLIP model
     clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-        "ViT-H-14", "laion2b_s32b_b79k"
+        "ViT-H-14-quickgelu", "metaclip_fullcc"
     )
     clip_model = clip_model.to(args.device)
-    clip_tokenizer = open_clip.get_tokenizer("ViT-H-14")
+    clip_tokenizer = open_clip.get_tokenizer("ViT-H-14-quickgelu")
 
     # Initialize the dataset
     dataset = get_dataset(
@@ -440,9 +519,13 @@ def main(args: argparse.Namespace):
         desired_width=args.desired_width,
         device="cpu",
         dtype=torch.float,
+        detector="yolo",
     )
 
     global_classes = set()
+
+    # initialize YOLO-World model
+    yolo_model_w_classes = YOLO("yolov8x-worldv2.pt")
 
     if args.class_set == "scene":
         # Load the object meta information
@@ -459,6 +542,8 @@ def main(args: argparse.Namespace):
         classes = FOREGROUND_GENERIC_CLASSES
     elif args.class_set == "minimal":
         classes = FOREGROUND_MINIMAL_CLASSES
+    elif args.class_set == "fix_set":
+        classes = FIX_SET_CLASSES
     elif args.class_set in ["tag2text", "ram"]:
         ### Initialize the Tag2Text or RAM model ###
 
@@ -519,6 +604,8 @@ def main(args: argparse.Namespace):
         video_save_path = args.dataset_root / args.scene_id / f"gsa_vis_{save_name}.mp4"
         frames = []
 
+    if DETECTOR == "yolo":
+        yolo_model_w_classes.set_classes(classes)
     for idx in trange(len(dataset)):
         ### Relevant paths and load image ###
         color_path = dataset.color_paths[idx]
@@ -608,6 +695,9 @@ def main(args: argparse.Namespace):
                 add_classes=add_classes,
                 remove_classes=remove_classes,
             )
+        elif args.class_set == "fix_set":
+            caption = "NA"
+            text_prompt = ",".join(classes)
 
         # add classes to global classes
         global_classes.update(classes)
@@ -644,7 +734,7 @@ def main(args: argparse.Namespace):
             )
 
             cv2.imwrite(vis_save_path, annotated_image)
-        else:
+        elif DETECTOR == "dino":
             # Using GroundingDINO to detect and SAM to segment
             detections = grounding_dino_model.predict_with_classes(
                 image=image,  # This function expects a BGR image...
@@ -692,26 +782,60 @@ def main(args: argparse.Namespace):
                     classes,
                     args.device,
                 )
-            else:
-                image_crops, image_feats, text_feats = [], [], []
+        else:
+            # YOLO
+            # yolo_model.set_classes(classes)
+            yolo_results_w_classes = yolo_model_w_classes.predict(color_path)
 
-            ### Visualize results ###
-            annotated_image, labels = vis_result_fast(image, detections, classes)
+            # yolo_results_w_classes[0].save(vis_save_path[:-4] + "_yolo_out.jpg")
+            xyxy_tensor = yolo_results_w_classes[0].boxes.xyxy
+            xyxy_np = xyxy_tensor.cpu().numpy()
+            confidences = yolo_results_w_classes[0].boxes.conf.cpu().numpy()
 
-            # save the annotated grounded-sam image
-            if args.class_set in ["ram", "tag2text"] and args.use_slow_vis:
-                annotated_image_caption = vis_result_slow_caption(
-                    image_rgb,
-                    detections.mask,
-                    detections.xyxy,
-                    labels,
-                    caption,
-                    text_prompt,
-                )
-                Image.fromarray(annotated_image_caption).save(vis_save_path)
-            else:
-                print(vis_save_path)
-                cv2.imwrite(vis_save_path, annotated_image)
+            detections = sv.Detections(
+                xyxy=xyxy_np,
+                confidence=confidences,
+                class_id=yolo_results_w_classes[0].boxes.cls.cpu().numpy().astype(int),
+                mask=None,
+            )
+
+        if len(detections.class_id) > 0:
+
+            ### Segment Anything ###
+            detections.mask = get_sam_segmentation_from_xyxy(
+                sam_predictor=sam_predictor, image=image_rgb, xyxy=detections.xyxy
+            )
+
+            # Compute and save the clip features of detections
+            image_crops, image_feats, text_feats = compute_clip_features(
+                image_rgb,
+                detections,
+                clip_model,
+                clip_preprocess,
+                clip_tokenizer,
+                classes,
+                args.device,
+            )
+        else:
+            image_crops, image_feats, text_feats = [], [], []
+
+        ### Visualize results ###
+        annotated_image, labels = vis_result_fast(image, detections, classes)
+
+        # save the annotated grounded-sam image
+        if args.class_set in ["ram", "tag2text", "fix_set"] and args.use_slow_vis:
+            annotated_image_caption = vis_result_slow_caption(
+                image_rgb,
+                detections.mask,
+                detections.xyxy,
+                labels,
+                caption,
+                text_prompt,
+            )
+            Image.fromarray(annotated_image_caption).save(vis_save_path)
+        else:
+            print(vis_save_path)
+            cv2.imwrite(vis_save_path, annotated_image)
 
         if args.save_video:
             frames.append(annotated_image)
@@ -728,7 +852,7 @@ def main(args: argparse.Namespace):
             "text_feats": text_feats,
         }
 
-        if args.class_set in ["ram", "tag2text"]:
+        if args.class_set in ["ram", "tag2text", "fix_set"]:
             results["tagging_caption"] = caption
             results["tagging_text_prompt"] = text_prompt
 
