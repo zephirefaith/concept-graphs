@@ -90,10 +90,24 @@ merge_text_sim_thresh=0.8
 The above commands will save the mapping results in `$HABITAT_DATA_ROOT/$SCENE_NAME/pcd_saves`. 
 It will create two pkl.gz files, where the one with _post suffix indicates results after some post processing, which we recommend using.
 
-### Get Room Labels for each Entity
+### Assign object-categories using CLIP and get room labels for each Entity
 
+Set the full-name of pl;.gz file with _post suffix from above as `PKL_FILENAME`. 
 ```bash
 export PKL_FILENAME=<full-name-of-post.pkl.gz-from-previous-run>
+```
+
+Run name refinement script which classifies each object against closed-vocab of object-names: 
+```bash
+python scripts/refine_node_names_using_clip.py \
+  --input-file $HABITAT_DATA_ROOT/$SCENE_NAME/pcd_saves/$PKL_FILENAME \
+  --threshold 0.15
+```
+
+Next run script which uses llama3.1:70b to assign room labels to each piece of furniture.
+
+
+```bash
 python scripts/get_room_labels.py \
   --input-file $HABITAT_DATA_ROOT/$SCENE_NAME/pcd_saves/$PKL_FILENAME
 ```
